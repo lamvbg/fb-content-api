@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     FACEBOOK_GRAPH_API_URL: str = "https://graph.facebook.com/v21.0"
 
     # X (Twitter) API
-    X_COOKIES_FILE: str = "cookies.txt"
+    X_COOKIES: str = ""
 
     # Grok (xAI) LLM
     XAI_API_KEY: str = ""

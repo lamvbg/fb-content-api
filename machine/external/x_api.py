@@ -112,11 +112,13 @@ FIELD_TOGGLES = {
 }
 
 
-# ── Cookie loader ────────────────────────────────────────────────────────────
+# ── Cookie parser ────────────────────────────────────────────────────────────
 
-def load_cookies(filepath: str) -> dict:
-    with open(filepath, "r", encoding="utf-8") as f:
-        raw = f.read().strip()
+def parse_cookies(raw: str) -> dict:
+    """Parse cookie string (semicolon-separated or JSON array) into dict."""
+    raw = raw.strip()
+    if not raw:
+        return {}
 
     try:
         items = json.loads(raw)
@@ -126,15 +128,11 @@ def load_cookies(filepath: str) -> dict:
         pass
 
     cookies: dict = {}
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        for part in line.split(";"):
-            part = part.strip()
-            if "=" in part:
-                k, _, v = part.partition("=")
-                cookies[k.strip()] = v.strip().strip('"')
+    for part in raw.split(";"):
+        part = part.strip()
+        if "=" in part:
+            k, _, v = part.partition("=")
+            cookies[k.strip()] = v.strip().strip('"')
     return cookies
 
 
@@ -234,10 +232,9 @@ class XService:
 
     @staticmethod
     def _load_cookies() -> dict:
-        try:
-            return load_cookies(settings.X_COOKIES_FILE)
-        except FileNotFoundError:
-            raise ExternalAPIException(detail="X cookies file not found. Place cookies.txt in project root.")
+        if not settings.X_COOKIES:
+            raise ExternalAPIException(detail="X_COOKIES not configured in .env")
+        return parse_cookies(settings.X_COOKIES)
 
     @classmethod
     async def lookup_user(cls, username: str) -> dict:
