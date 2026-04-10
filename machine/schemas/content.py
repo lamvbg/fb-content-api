@@ -19,8 +19,18 @@ class DouyinVideoResponse(BaseModel):
 
 
 class FetchTrendingRequest(BaseModel):
-    pages: int = Field(default=5, ge=1, le=20, description="Number of feed pages to fetch (each ~10 videos)")
+    pages: int = Field(default=5, ge=1, le=20, description="Number of feed pages to fetch (each ~2 videos)")
     top: int = Field(default=10, ge=1, le=50, description="Number of top videos to return")
+    keyword: str | None = Field(default=None, description="Optional keyword filter (matches desc or nickname)")
+
+
+class FetchDouyinUserRequest(BaseModel):
+    sec_user_id: str = Field(..., description="Douyin user sec_uid (from profile URL)")
+    count: int = Field(default=10, ge=1, le=30, description="Number of videos")
+
+
+class FetchDouyinVideoDetailRequest(BaseModel):
+    url: str = Field(..., description="Douyin video URL (short link v.douyin.com/xxx or full link douyin.com/video/xxx)")
 
 
 class HotKeywordsResponse(BaseModel):

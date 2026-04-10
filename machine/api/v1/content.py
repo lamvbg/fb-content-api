@@ -5,6 +5,8 @@ from machine.controllers.content_controller import ContentController
 from machine.providers.content_provider import get_content_controller
 from machine.schemas.content import (
     DouyinVideoResponse,
+    FetchDouyinUserRequest,
+    FetchDouyinVideoDetailRequest,
     FetchTrendingRequest,
     FetchTweetRequest,
     FetchUserTweetsRequest,
@@ -22,13 +24,43 @@ router = APIRouter(prefix="/content", tags=["Content"])
 @router.post(
     "/douyin/trending",
     response_model=SuccessResponse[list[DouyinVideoResponse]],
-    summary="Fetch trending Douyin videos ranked by engagement",
+    summary="Fetch trending Douyin videos — optionally filter by keyword",
 )
 async def fetch_douyin_trending(
     body: FetchTrendingRequest,
     controller: ContentController = Depends(get_content_controller),
 ):
-    result = await controller.fetch_douyin_trending(pages=body.pages, top=body.top)
+    result = await controller.fetch_douyin_trending(
+        pages=body.pages, top=body.top, keyword=body.keyword
+    )
+    return SuccessResponse(data=result)
+
+
+@router.post(
+    "/douyin/user-videos",
+    response_model=SuccessResponse[list[DouyinVideoResponse]],
+    summary="Fetch videos from a specific Douyin user",
+)
+async def fetch_douyin_user_videos(
+    body: FetchDouyinUserRequest,
+    controller: ContentController = Depends(get_content_controller),
+):
+    result = await controller.fetch_douyin_user_videos(
+        sec_user_id=body.sec_user_id, count=body.count
+    )
+    return SuccessResponse(data=result)
+
+
+@router.post(
+    "/douyin/video-detail",
+    response_model=SuccessResponse[DouyinVideoResponse],
+    summary="Parse a Douyin video URL and return video details",
+)
+async def fetch_douyin_video_detail(
+    body: FetchDouyinVideoDetailRequest,
+    controller: ContentController = Depends(get_content_controller),
+):
+    result = await controller.fetch_douyin_video_detail(url=body.url)
     return SuccessResponse(data=result)
 
 

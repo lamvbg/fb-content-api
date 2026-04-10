@@ -21,7 +21,17 @@ settings = get_settings()
 # ── Constants ────────────────────────────────────────────────────────────────
 
 FEED_URL = "https://www.douyin.com/aweme/v1/web/tab/feed/"
+USER_POST_URL = "https://www.douyin.com/aweme/v1/web/aweme/post/"
 HOT_SEARCH_URL = "https://www.douyin.com/aweme/v1/web/hot/search/list/"
+VIDEO_DETAIL_URL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
+
+# Regex patterns to extract aweme_id from various Douyin URL formats
+_AWEME_ID_PATTERNS = [
+    re.compile(r"video/([^/?]+)"),       # douyin.com/video/7372484719365098803
+    re.compile(r"[?&]vid=(\d+)"),        # douyin.com/user/xxx?vid=7285950278132616463
+    re.compile(r"note/([^/?]+)"),        # douyin.com/note/xxx (image posts)
+    re.compile(r"modal_id=(\d+)"),       # douyin.com/discover?modal_id=xxx
+]
 
 HEADERS_BASE = {
     "User-Agent": (
@@ -174,12 +184,15 @@ class DouyinService:
             return []
 
     @classmethod
-    async def fetch_trending(cls, pages: int = 5, top: int = 10) -> list[dict]:
+    async def fetch_trending(
+        cls, pages: int = 5, top: int = 10, keyword: str | None = None
+    ) -> list[dict]:
         """Fetch trending videos, ranked by engagement score.
 
         Args:
-            pages: Number of feed pages to fetch (each ~10 videos). Max 20.
+            pages: Number of feed pages to fetch (each ~2 videos). Max 20.
             top: Number of top videos to return. Max 50.
+            keyword: Optional filter — only return videos matching keyword in desc or nickname.
         """
         pages = min(pages, 20)
         top = min(top, 50)
@@ -203,8 +216,124 @@ class DouyinService:
                 p["score"] = int(_score(p))
                 videos.append(p)
 
+        # Optional keyword filter
+        if keyword:
+            kw_lower = keyword.lower()
+            videos = [
+                v for v in videos
+                if kw_lower in v["desc"].lower() or kw_lower in v["nickname"].lower()
+            ]
+
         videos.sort(key=lambda v: v["score"], reverse=True)
         return videos[:top]
+
+    @classmethod
+    async def fetch_user_videos(
+        cls, sec_user_id: str, count: int = 10
+    ) -> list[dict]:
+        """Fetch videos from a specific Douyin user.
+
+        Args:
+            sec_user_id: The sec_uid from the user's profile URL.
+            count: Number of videos to return (max 30).
+        """
+        count = min(count, 30)
+        cookie = cls._get_cookie()
+
+        async with cls._make_client(cookie) as client:
+            try:
+                resp = await client.get(
+                    USER_POST_URL,
+                    params={
+                        "device_platform": "webapp",
+                        "aid": "6383",
+                        "sec_user_id": sec_user_id,
+                        "max_cursor": "0",
+                        "count": str(count),
+                    },
+                )
+                if resp.status_code != 200:
+                    raise ExternalAPIException(
+                        detail=f"Douyin user posts error: HTTP {resp.status_code}"
+                    )
+                data = resp.json()
+            except ExternalAPIException:
+                raise
+            except Exception as e:
+                raise ExternalAPIException(detail=f"Douyin user posts error: {e}")
+
+        raw_list = data.get("aweme_list") or []
+        seen: set[str] = set()
+        videos: list[dict] = []
+        for item in raw_list:
+            p = _parse_aweme(item)
+            if p and p["aweme_id"] not in seen:
+                seen.add(p["aweme_id"])
+                p["score"] = int(_score(p))
+                videos.append(p)
+
+        return videos[:count]
+
+    @classmethod
+    async def _resolve_aweme_id(cls, url: str) -> str:
+        """Resolve a Douyin URL (short or full) to an aweme_id."""
+        cookie = cls._get_cookie()
+        async with cls._make_client(cookie) as client:
+            try:
+                resp = await client.get(url, follow_redirects=True)
+                final_url = str(resp.url)
+            except Exception as e:
+                raise ExternalAPIException(detail=f"Failed to resolve Douyin URL: {e}")
+
+        for pattern in _AWEME_ID_PATTERNS:
+            m = pattern.search(final_url)
+            if m:
+                return m.group(1)
+
+        raise ExternalAPIException(
+            detail=f"Could not extract aweme_id from URL: {final_url}"
+        )
+
+    @classmethod
+    async def fetch_video_detail(cls, url: str) -> dict:
+        """Fetch detailed info for a single Douyin video by URL.
+
+        Supports short links (v.douyin.com/xxx) and full links
+        (douyin.com/video/xxx, douyin.com/note/xxx, etc.).
+        """
+        aweme_id = await cls._resolve_aweme_id(url)
+        cookie = cls._get_cookie()
+
+        async with cls._make_client(cookie) as client:
+            try:
+                resp = await client.get(
+                    VIDEO_DETAIL_URL,
+                    params={
+                        "device_platform": "webapp",
+                        "aid": "6383",
+                        "aweme_id": aweme_id,
+                    },
+                )
+                if resp.status_code != 200:
+                    raise ExternalAPIException(
+                        detail=f"Douyin video detail error: HTTP {resp.status_code}"
+                    )
+                data = resp.json()
+            except ExternalAPIException:
+                raise
+            except Exception as e:
+                raise ExternalAPIException(detail=f"Douyin video detail error: {e}")
+
+        aweme = data.get("aweme_detail")
+        if not aweme:
+            raise ExternalAPIException(detail="Video not found or unavailable")
+
+        parsed = _parse_aweme(aweme)
+        if not parsed:
+            raise ExternalAPIException(detail="Failed to parse video data")
+
+        parsed["score"] = int(_score(parsed))
+        return parsed
 
     @classmethod
     async def fetch_hot_keywords(cls) -> list[str]:

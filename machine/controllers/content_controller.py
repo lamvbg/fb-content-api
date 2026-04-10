@@ -10,8 +10,18 @@ class ContentController:
     # ── Douyin ───────────────────────────────────────────────────────────
 
     @staticmethod
-    async def fetch_douyin_trending(pages: int = 5, top: int = 10) -> list[dict]:
-        return await DouyinService.fetch_trending(pages=pages, top=top)
+    async def fetch_douyin_trending(
+        pages: int = 5, top: int = 10, keyword: str | None = None
+    ) -> list[dict]:
+        return await DouyinService.fetch_trending(pages=pages, top=top, keyword=keyword)
+
+    @staticmethod
+    async def fetch_douyin_user_videos(sec_user_id: str, count: int = 10) -> list[dict]:
+        return await DouyinService.fetch_user_videos(sec_user_id=sec_user_id, count=count)
+
+    @staticmethod
+    async def fetch_douyin_video_detail(url: str) -> dict:
+        return await DouyinService.fetch_video_detail(url=url)
 
     @staticmethod
     async def fetch_douyin_hot_keywords() -> dict:
