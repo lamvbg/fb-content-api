@@ -1,10 +1,24 @@
 from core.exceptions.http import BadRequestException
+from machine.external.douyin import DouyinService
 from machine.external.grok import GrokService
 from machine.external.x_api import XService
 
 
 class ContentController:
-    """Handles fetching X tweets and rewriting with Grok LLM."""
+    """Handles fetching X tweets, Douyin videos, and rewriting with Grok LLM."""
+
+    # ── Douyin ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    async def fetch_douyin_trending(pages: int = 5, top: int = 10) -> list[dict]:
+        return await DouyinService.fetch_trending(pages=pages, top=top)
+
+    @staticmethod
+    async def fetch_douyin_hot_keywords() -> dict:
+        keywords = await DouyinService.fetch_hot_keywords()
+        return {"keywords": keywords}
+
+    # ── X/Twitter ────────────────────────────────────────────────────────
 
     @staticmethod
     async def fetch_tweet(url: str) -> dict:

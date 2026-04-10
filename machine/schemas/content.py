@@ -1,6 +1,32 @@
 from pydantic import BaseModel, Field
 
 
+# ── Douyin ───────────────────────────────────────────────────────────────────
+
+class DouyinVideoResponse(BaseModel):
+    aweme_id: str
+    desc: str
+    created_at: str
+    nickname: str
+    digg_count: int
+    comment_count: int
+    share_count: int
+    collect_count: int
+    cover: str
+    video_url: str
+    douyin_url: str
+    score: int
+
+
+class FetchTrendingRequest(BaseModel):
+    pages: int = Field(default=5, ge=1, le=20, description="Number of feed pages to fetch (each ~10 videos)")
+    top: int = Field(default=10, ge=1, le=50, description="Number of top videos to return")
+
+
+class HotKeywordsResponse(BaseModel):
+    keywords: list[str]
+
+
 # ── X/Twitter Tweets ─────────────────────────────────────────────────────────
 
 class TweetResponse(BaseModel):

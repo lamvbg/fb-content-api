@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     # X (Twitter) API
     X_COOKIES: str = ""
 
+    # Douyin
+    DOUYIN_COOKIES: str = ""
+
     # Grok (xAI) LLM
     XAI_API_KEY: str = ""
     XAI_MODEL: str = "grok-3-mini"

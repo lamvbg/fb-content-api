@@ -4,15 +4,47 @@ from core.response.base import SuccessResponse
 from machine.controllers.content_controller import ContentController
 from machine.providers.content_provider import get_content_controller
 from machine.schemas.content import (
+    DouyinVideoResponse,
+    FetchTrendingRequest,
     FetchTweetRequest,
     FetchUserTweetsRequest,
+    HotKeywordsResponse,
     RewriteRequest,
     RewriteResponse,
     TweetResponse,
 )
 
-router = APIRouter(prefix="/content", tags=["X Content & Grok Rewrite"])
+router = APIRouter(prefix="/content", tags=["Content"])
 
+
+# ── Douyin ───────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/douyin/trending",
+    response_model=SuccessResponse[list[DouyinVideoResponse]],
+    summary="Fetch trending Douyin videos ranked by engagement",
+)
+async def fetch_douyin_trending(
+    body: FetchTrendingRequest,
+    controller: ContentController = Depends(get_content_controller),
+):
+    result = await controller.fetch_douyin_trending(pages=body.pages, top=body.top)
+    return SuccessResponse(data=result)
+
+
+@router.get(
+    "/douyin/hot-keywords",
+    response_model=SuccessResponse[HotKeywordsResponse],
+    summary="Fetch current hot search keywords from Douyin",
+)
+async def fetch_douyin_hot_keywords(
+    controller: ContentController = Depends(get_content_controller),
+):
+    result = await controller.fetch_douyin_hot_keywords()
+    return SuccessResponse(data=result)
+
+
+# ── X/Twitter ────────────────────────────────────────────────────────────────
 
 @router.post(
     "/x/tweet",
@@ -39,6 +71,8 @@ async def fetch_user_tweets(
     result = await controller.fetch_user_tweets(body.username, body.count)
     return SuccessResponse(data=result)
 
+
+# ── Grok Rewrite ─────────────────────────────────────────────────────────────
 
 @router.post(
     "/rewrite",
