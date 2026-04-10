@@ -14,9 +14,12 @@ from machine.api.v1.content import router as content_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create tables on startup (use alembic in production)
-    async with async_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Create tables on startup — skip silently in serverless (Vercel)
+    try:
+        async with async_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception:
+        pass
     yield
     await async_engine.dispose()
 
