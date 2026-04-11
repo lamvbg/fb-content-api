@@ -10,3 +10,6 @@ httpx==0.28.1
 python-dotenv==1.1.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.20
+gmssl==3.2.2
+imageio-ffmpeg==0.5.1
+playwright==1.52.0

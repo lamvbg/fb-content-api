@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     XAI_API_KEY: str = ""
     XAI_MODEL: str = "grok-3-mini"
 
+    # Grok Video Generation (grok.com web session)
+    GROK_COOKIES: str = ""
+    GROK_USER_AGENT: str = ""
+
+    # Browser Automation (anti-detect browser local API)
+    BROWSER_API_URL: str = "http://127.0.0.1:19995/api"
+
     # Server
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000

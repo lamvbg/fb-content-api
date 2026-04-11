@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from core.db.base import Base
 from core.db.session import async_engine
@@ -48,6 +50,12 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(fanpage_router, prefix="/api/v1")
 app.include_router(test_user_router, prefix="/api/v1")
 app.include_router(content_router, prefix="/api/v1")
+
+
+# Serve downloaded video files
+_downloads = Path("downloads")
+_downloads.mkdir(exist_ok=True)
+app.mount("/downloads", StaticFiles(directory=str(_downloads)), name="downloads")
 
 
 @app.get("/health", tags=["Health"])

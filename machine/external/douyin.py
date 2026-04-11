@@ -14,6 +14,7 @@ import httpx
 
 from core.exceptions.http import ExternalAPIException
 from core.settings import get_settings
+from machine.external.abogus import ABogus
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -33,12 +34,20 @@ _AWEME_ID_PATTERNS = [
     re.compile(r"modal_id=(\d+)"),       # douyin.com/discover?modal_id=xxx
 ]
 
+_UA_GENERAL = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+# A-Bogus ua_code is hardcoded for Chrome/90 — detail API must use this UA
+_UA_ABOGUS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/90.0.4430.212 Safari/537.36"
+)
+
 HEADERS_BASE = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": _UA_GENERAL,
     "Referer": "https://www.douyin.com/",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-CN,zh;q=0.9",
@@ -240,18 +249,55 @@ class DouyinService:
         count = min(count, 30)
         cookie = cls._get_cookie()
 
-        async with cls._make_client(cookie) as client:
+        params = {
+            "device_platform": "webapp",
+            "aid": "6383",
+            "channel": "channel_pc_web",
+            "sec_user_id": sec_user_id,
+            "max_cursor": "0",
+            "locate_query": "false",
+            "show_live_replay_strategy": "1",
+            "need_time_list": "1",
+            "time_list_query": "0",
+            "whale_cut_token": "",
+            "cut_version": "1",
+            "count": str(count),
+            "publish_video_strategy_type": "2",
+            "version_code": "170400",
+            "version_name": "17.4.0",
+            "cookie_enabled": "true",
+            "screen_width": "1920",
+            "screen_height": "1080",
+            "browser_language": "zh-CN",
+            "browser_platform": "Win32",
+            "browser_name": "Chrome",
+            "browser_version": "131.0.0.0",
+            "browser_online": "true",
+            "engine_name": "Blink",
+            "engine_version": "131.0.0.0",
+            "os_name": "Windows",
+            "os_version": "10",
+            "cpu_core_num": "12",
+            "device_memory": "8",
+            "platform": "PC",
+            "downlink": "10",
+            "effective_type": "4g",
+            "round_trip_time": "50",
+            "msToken": "",
+        }
+
+        a_bogus = ABogus.generate(params)
+        query = "&".join(f"{k}={v}" for k, v in params.items())
+        full_url = f"{USER_POST_URL}?{query}&a_bogus={a_bogus}"
+
+        headers = {**HEADERS_BASE, "Cookie": cookie, "User-Agent": _UA_ABOGUS}
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        async with httpx.AsyncClient(headers=headers, verify=ssl_ctx, timeout=15) as client:
             try:
-                resp = await client.get(
-                    USER_POST_URL,
-                    params={
-                        "device_platform": "webapp",
-                        "aid": "6383",
-                        "sec_user_id": sec_user_id,
-                        "max_cursor": "0",
-                        "count": str(count),
-                    },
-                )
+                resp = await client.get(full_url)
                 if resp.status_code != 200:
                     raise ExternalAPIException(
                         detail=f"Douyin user posts error: HTTP {resp.status_code}"
@@ -269,10 +315,50 @@ class DouyinService:
             p = _parse_aweme(item)
             if p and p["aweme_id"] not in seen:
                 seen.add(p["aweme_id"])
-                p["score"] = int(_score(p))
+                p["score"] = 0
                 videos.append(p)
 
+        # API already returns newest first — keep that order
         return videos[:count]
+
+    @classmethod
+    async def fetch_multi_user_videos(
+        cls,
+        sec_user_ids: list[str],
+        count_per_user: int = 5,
+        top: int = 10,
+        keyword: str | None = None,
+    ) -> list[dict]:
+        """Fetch latest videos from multiple users, sorted by newest first."""
+        import asyncio
+
+        tasks = [
+            cls.fetch_user_videos(uid, count=count_per_user)
+            for uid in sec_user_ids
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        seen: set[str] = set()
+        all_videos: list[dict] = []
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning("Failed to fetch user videos: %s", r)
+                continue
+            for v in r:
+                if v["aweme_id"] not in seen:
+                    seen.add(v["aweme_id"])
+                    all_videos.append(v)
+
+        if keyword:
+            kw_lower = keyword.lower()
+            all_videos = [
+                v for v in all_videos
+                if kw_lower in v["desc"].lower() or kw_lower in v["nickname"].lower()
+            ]
+
+        # Sort by created_at descending (newest first)
+        all_videos.sort(key=lambda v: v["created_at"], reverse=True)
+        return all_videos[:top]
 
     @classmethod
     async def _resolve_aweme_id(cls, url: str) -> str:
@@ -304,16 +390,46 @@ class DouyinService:
         aweme_id = await cls._resolve_aweme_id(url)
         cookie = cls._get_cookie()
 
-        async with cls._make_client(cookie) as client:
+        params = {
+            "device_platform": "webapp",
+            "aid": "6383",
+            "channel": "channel_pc_web",
+            "aweme_id": aweme_id,
+            "version_code": "290100",
+            "version_name": "29.1.0",
+            "cookie_enabled": "true",
+            "screen_width": "1920",
+            "screen_height": "1080",
+            "browser_language": "zh-CN",
+            "browser_platform": "Win32",
+            "browser_name": "Chrome",
+            "browser_version": "90.0.4430.212",
+            "browser_online": "true",
+            "engine_name": "Blink",
+            "engine_version": "90.0.4430.212",
+            "os_name": "Windows",
+            "os_version": "10",
+            "cpu_core_num": "12",
+            "device_memory": "8",
+            "platform": "PC",
+            "downlink": "10",
+            "effective_type": "4g",
+            "round_trip_time": "50",
+            "msToken": "",
+        }
+
+        a_bogus = ABogus.generate(params)
+        query = "&".join(f"{k}={v}" for k, v in params.items())
+        full_url = f"{VIDEO_DETAIL_URL}?{query}&a_bogus={a_bogus}"
+
+        headers = {**HEADERS_BASE, "Cookie": cookie, "User-Agent": _UA_ABOGUS}
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        async with httpx.AsyncClient(headers=headers, verify=ssl_ctx, timeout=15) as client:
             try:
-                resp = await client.get(
-                    VIDEO_DETAIL_URL,
-                    params={
-                        "device_platform": "webapp",
-                        "aid": "6383",
-                        "aweme_id": aweme_id,
-                    },
-                )
+                resp = await client.get(full_url)
                 if resp.status_code != 200:
                     raise ExternalAPIException(
                         detail=f"Douyin video detail error: HTTP {resp.status_code}"
@@ -334,6 +450,130 @@ class DouyinService:
 
         parsed["score"] = int(_score(parsed))
         return parsed
+
+    @classmethod
+    async def download_video(
+        cls, url: str, segment_duration: int = 5, max_segments: int = 5,
+    ) -> dict:
+        """Download a Douyin video by URL and split into short segments.
+
+        Creates a new session folder for this download.
+        """
+        from machine.external.video_processor import download_and_split
+        import uuid
+
+        detail = await cls.fetch_video_detail(url)
+        video_url = detail.get("video_url", "")
+        if not video_url:
+            raise ExternalAPIException(detail="No downloadable video URL found")
+
+        cookie = cls._get_cookie()
+        filename = detail.get("desc") or detail.get("aweme_id", "video")
+        session_id = uuid.uuid4().hex[:12]
+
+        result = await download_and_split(
+            video_url=video_url,
+            filename=filename,
+            cookie=cookie,
+            segment_duration=segment_duration,
+            max_segments=max_segments,
+            session_id=session_id,
+        )
+        result["video_info"] = detail
+        return result
+
+    @classmethod
+    async def search_videos(
+        cls, keyword: str, count: int = 10, offset: int = 0
+    ) -> list[dict]:
+        """Search Douyin videos by keyword.
+
+        Args:
+            keyword: Search query string.
+            count: Number of results (max 20).
+            offset: Pagination offset.
+        """
+        count = min(count, 20)
+        cookie = cls._get_cookie()
+
+        params = {
+            "keyword": keyword,
+            "count": str(count),
+            "offset": str(offset),
+            "search_id": "",
+            "channel": "channel_pc_web",
+            "search_source": "normal_search",
+            "query_correct_type": "1",
+            "is_filter_search": "0",
+            "device_platform": "webapp",
+            "aid": "6383",
+            "version_code": "290100",
+            "version_name": "29.1.0",
+            "cookie_enabled": "true",
+            "screen_width": "1920",
+            "screen_height": "1080",
+            "browser_language": "zh-CN",
+            "browser_platform": "Win32",
+            "browser_name": "Chrome",
+            "browser_version": "90.0.4430.212",
+            "browser_online": "true",
+            "engine_name": "Blink",
+            "engine_version": "90.0.4430.212",
+            "os_name": "Windows",
+            "os_version": "10",
+            "cpu_core_num": "12",
+            "device_memory": "8",
+            "platform": "PC",
+            "downlink": "10",
+            "effective_type": "4g",
+            "round_trip_time": "50",
+            "msToken": "",
+        }
+
+        a_bogus = ABogus.generate(params)
+        query = "&".join(f"{k}={v}" for k, v in params.items())
+        search_url = "https://www.douyin.com/aweme/v1/web/search/item/"
+        full_url = f"{search_url}?{query}&a_bogus={a_bogus}"
+
+        headers = {**HEADERS_BASE, "Cookie": cookie, "User-Agent": _UA_ABOGUS}
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        async with httpx.AsyncClient(headers=headers, verify=ssl_ctx, timeout=15) as client:
+            try:
+                resp = await client.get(full_url)
+                if resp.status_code != 200:
+                    raise ExternalAPIException(
+                        detail=f"Douyin search error: HTTP {resp.status_code}"
+                    )
+                data = resp.json()
+            except ExternalAPIException:
+                raise
+            except Exception as e:
+                raise ExternalAPIException(detail=f"Douyin search error: {e}")
+
+        # Douyin may require captcha verification for search
+        nil_info = data.get("search_nil_info") or {}
+        if nil_info.get("search_nil_type") == "verify_check":
+            raise ExternalAPIException(
+                detail="Douyin search requires captcha verification. "
+                "Please update DOUYIN_COOKIES with a fresh session cookie "
+                "from a browser where you have completed a search."
+            )
+
+        raw_list = data.get("aweme_list") or data.get("data") or []
+        seen: set[str] = set()
+        videos: list[dict] = []
+        for item in raw_list:
+            aweme = item.get("aweme_info") or item
+            p = _parse_aweme(aweme)
+            if p and p["aweme_id"] not in seen:
+                seen.add(p["aweme_id"])
+                p["score"] = int(_score(p))
+                videos.append(p)
+
+        return videos[:count]
 
     @classmethod
     async def fetch_hot_keywords(cls) -> list[str]:
