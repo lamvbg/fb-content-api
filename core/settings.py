@@ -4,7 +4,7 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     # Database
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/fb_fanpage"
+    DATABASE_URL: str = "sqlite+aiosqlite:///./app.db"
 
     # JWT
     JWT_SECRET_KEY: str = "change-me-in-production"

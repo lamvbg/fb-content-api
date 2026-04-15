@@ -21,8 +21,6 @@ from core.exceptions.http import ExternalAPIException
 from core.settings import get_settings
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
-
 
 class BrowserService:
     """Manages browser profile connections via local API + Playwright CDP."""
@@ -30,7 +28,7 @@ class BrowserService:
     @classmethod
     async def _api_get(cls, path: str) -> dict:
         """GET request to local browser API."""
-        url = f"{settings.BROWSER_API_URL.rstrip('/')}{path}"
+        url = f"{get_settings().BROWSER_API_URL.rstrip('/')}{path}"
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url)
         if resp.status_code != 200:
@@ -42,7 +40,7 @@ class BrowserService:
     @classmethod
     async def _api_post(cls, path: str, body: dict | None = None) -> dict:
         """POST request to local browser API."""
-        url = f"{settings.BROWSER_API_URL.rstrip('/')}{path}"
+        url = f"{get_settings().BROWSER_API_URL.rstrip('/')}{path}"
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(url, json=body or {})
         if resp.status_code != 200:
@@ -57,7 +55,7 @@ class BrowserService:
 
         If the profile is already running, fetches its status instead.
         """
-        url = f"{settings.BROWSER_API_URL.rstrip('/')}/profiles/{profile_id}/launch"
+        url = f"{get_settings().BROWSER_API_URL.rstrip('/')}/profiles/{profile_id}/launch"
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(url, json={})
 

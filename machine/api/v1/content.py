@@ -385,6 +385,44 @@ async def publish_video(
 
 
 @router.get(
+    "/browser/profiles",
+    summary="List all browser profiles from local anti-detect browser API",
+)
+async def list_browser_profiles():
+    """Proxy to local browser API — returns profile list using configured BROWSER_API_URL."""
+    import httpx
+    from fastapi import HTTPException
+    from machine.external.browser import BrowserService
+    from core.settings import get_settings
+    s = get_settings()
+    try:
+        data = await BrowserService._api_get("/profiles")
+        return SuccessResponse(data=data)
+    except (httpx.ConnectError, httpx.TimeoutException):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot connect to browser API at {s.BROWSER_API_URL}. Make sure the anti-detect browser tool is running."
+        )
+
+
+@router.get(
+    "/browser/health",
+    summary="Check if local anti-detect browser API is reachable",
+)
+async def browser_health():
+    import httpx
+    from core.settings import get_settings
+    s = get_settings()
+    url = s.BROWSER_API_URL.replace("/api", "").rstrip("/") + "/health"
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(url)
+        return SuccessResponse(data={"available": resp.status_code < 500, "url": s.BROWSER_API_URL})
+    except Exception:
+        return SuccessResponse(data={"available": False, "url": s.BROWSER_API_URL})
+
+
+@router.get(
     "/browser/test/{profile_id}",
     summary="Test browser profile connection — launch, connect CDP, verify YouTube login",
 )
@@ -430,3 +468,47 @@ async def test_browser_connection(profile_id: str):
             "error": f"{type(e).__name__}: {e}",
             "traceback": traceback.format_exc(),
         })
+
+
+# ── App Settings (browser API URL) ───────────────────────────────────────────
+
+@router.get("/settings", summary="Get current app settings")
+async def get_app_settings():
+    from core.settings import get_settings
+    s = get_settings()
+    return SuccessResponse(data={"browser_api_url": s.BROWSER_API_URL})
+
+
+@router.post("/settings", summary="Update app settings (writes to .env, reloads config)")
+async def update_app_settings(body: dict):
+    import os
+    import re
+    from core.settings import get_settings
+
+    browser_api_url = (body.get("browser_api_url") or "").strip()
+    if not browser_api_url:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="browser_api_url is required")
+
+    # Read/create .env in cwd
+    env_path = os.path.join(os.getcwd(), ".env")
+    if os.path.exists(env_path):
+        content = open(env_path, "r", encoding="utf-8").read()
+    else:
+        content = ""
+
+    key = "BROWSER_API_URL"
+    new_line = f'{key}={browser_api_url}'
+    if re.search(rf'^{key}\s*=', content, re.MULTILINE):
+        content = re.sub(rf'^{key}\s*=.*$', new_line, content, flags=re.MULTILINE)
+    else:
+        content = content.rstrip("\n") + "\n" + new_line + "\n"
+
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    # Reload settings cache
+    get_settings.cache_clear()
+
+    s = get_settings()
+    return SuccessResponse(data={"browser_api_url": s.BROWSER_API_URL, "saved": True})
