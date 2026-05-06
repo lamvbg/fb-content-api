@@ -150,8 +150,14 @@ class BrowserService:
         return ws_url
 
     @staticmethod
-    def connect_sync(ws_endpoint: str):
+    def connect_sync(ws_endpoint: str, fresh_tab: bool = True):
         """Connect Playwright (sync) to a CDP endpoint.
+
+        Args:
+            ws_endpoint: CDP WebSocket URL.
+            fresh_tab: If True, close all existing tabs and open a clean new one.
+                       This avoids stale state (translate popups, security banners,
+                       half-loaded dialogs) from previous runs.
 
         Returns:
             Tuple of (playwright_instance, browser, context, page).
@@ -163,11 +169,24 @@ class BrowserService:
             contexts = browser.contexts
             if contexts:
                 context = contexts[0]
-                pages = context.pages
-                page = pages[0] if pages else context.new_page()
             else:
                 context = browser.new_context()
+
+            if fresh_tab:
+                # Open a fresh tab first, then close old ones — this way the
+                # browser never has zero pages (which would auto-close it on
+                # some Chrome variants).
                 page = context.new_page()
+                for old in list(context.pages):
+                    if old is page:
+                        continue
+                    try:
+                        old.close()
+                    except Exception:
+                        pass
+            else:
+                pages = context.pages
+                page = pages[0] if pages else context.new_page()
             return pw, browser, context, page
         except Exception as e:
             pw.stop()

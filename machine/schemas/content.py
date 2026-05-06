@@ -117,12 +117,29 @@ class RewriteResponse(BaseModel):
     tweet_url: str | None = None
 
 
+# ── Grok KOL Image Generation ────────────────────────────────────────────────
+
+class GenerateKOLImageRequest(BaseModel):
+    image_path: str | None = Field(default=None, description="Local path to a reference face image (optional)")
+    session_id: str | None = Field(default=None, description="Session ID — saves image into that session's grok/ folder")
+
+
+class GenerateKOLImageResponse(BaseModel):
+    local_filename: str
+    local_path: str
+    image_url: str
+    asset_id: str
+    download_url: str
+
+
 # ── Grok Video Generation ───────────────────────────────────────────────────
 
 class GenerateVideoRequest(BaseModel):
-    prompt: str = Field(..., description="Text prompt describing the video to generate")
+    prompt: str | None = Field(default=None, description="Text prompt describing the video (legacy mode)")
+    content: str | None = Field(default=None, description="Source content for KOL dialogue generation — auto-builds the KOL video prompt")
+    image_path: str | None = Field(default=None, description="Local path to KOL image from /grok/generate-kol-image (required for KOL mode)")
     session_id: str | None = Field(default=None, description="Session ID from Douyin download — saves video into that session's grok/ folder")
-    ratio: str = Field(default="16:9", description="Aspect ratio: '1:1', '16:9', or '9:16'")
+    ratio: str = Field(default="9:16", description="Aspect ratio: '1:1', '16:9', or '9:16'")
     length: int = Field(default=6, description="Video length in seconds: 6 or 10")
     res: str = Field(default="480p", description="Resolution: '480p' or '720p'")
     upscale: bool = Field(default=True, description="Upscale to HD after generation")
@@ -244,6 +261,8 @@ class PublishVideoRequest(BaseModel):
     description: str | None = Field(default=None, description="Video description (auto-generated if empty)")
     tags: list[str] | None = Field(default=None, description="Tags/keywords (auto-generated if empty)")
     visibility: str = Field(default="public", description="Visibility: 'public', 'unlisted', or 'private'")
+    schedule_time: str | None = Field(default=None, description="ISO datetime to schedule: 'YYYY-MM-DDTHH:MM:00'")
+    timezone: str | None = Field(default=None, description="IANA timezone name e.g. 'Asia/Ho_Chi_Minh'")
 
 
 class PublishVideoResponse(BaseModel):

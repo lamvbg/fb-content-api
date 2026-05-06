@@ -8,7 +8,7 @@ from pathlib import Path
 from core.exceptions.http import BadRequestException
 from machine.external.douyin import DouyinService
 from machine.external.grok import GrokService
-from machine.external.grok_chat import GrokChatService
+from machine.external.grok_chat import GrokChatService, build_kol_video_prompt
 from machine.external.grok_video import GrokVideoService
 from machine.external.video_processor import DOWNLOAD_DIR, _get_video_duration, extract_frames, merge_videos
 from machine.external.x_api import XService
@@ -75,17 +75,36 @@ class ContentController:
     async def fetch_user_tweets(username: str, count: int = 10) -> list[dict]:
         return await XService.fetch_user_tweets(username, count)
 
+    # ── Grok KOL Image ─────────────────────────────────────────────────
+
+    @staticmethod
+    async def generate_kol_image(
+        image_path: str | None = None,
+        session_id: str | None = None,
+    ) -> dict:
+        return await GrokChatService.generate_kol_image(
+            image_path=image_path,
+            session_id=session_id,
+        )
+
     # ── Grok Video ─────────────────────────────────────────────────────
 
     @staticmethod
     async def generate_video(
-        prompt: str, session_id: str | None = None,
+        prompt: str | None = None,
+        content: str | None = None,
+        image_path: str | None = None,
+        session_id: str | None = None,
         ratio: str = "16:9", length: int = 6,
         res: str = "480p", upscale: bool = True,
     ) -> dict:
+        if content and not prompt:
+            prompt = build_kol_video_prompt(content)
+        if not prompt:
+            raise BadRequestException(detail="Either 'prompt' or 'content' must be provided")
         return await GrokVideoService.generate_video(
             prompt=prompt, ratio=ratio, length=length, res=res,
-            upscale=upscale, session_id=session_id,
+            upscale=upscale, session_id=session_id, image_path=image_path,
         )
 
     # ── Video Library (session-based) ─────────────────────────────────
@@ -287,6 +306,8 @@ class ContentController:
         description: str | None = None,
         tags: list[str] | None = None,
         visibility: str = "public",
+        schedule_time: str | None = None,
+        timezone: str | None = None,
     ) -> dict:
         """Publish a video to a platform via browser automation."""
         video_path = DOWNLOAD_DIR / session_id / filename
@@ -329,6 +350,8 @@ class ContentController:
                 description=description,
                 tags=tags,
                 visibility=visibility,
+                schedule_time=schedule_time,
+                timezone=timezone,
             )
 
         raise BadRequestException(detail=f"Unsupported platform: {platform}")

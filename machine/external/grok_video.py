@@ -90,14 +90,13 @@ class GrokVideoService:
     @classmethod
     def _get_config(cls) -> tuple[str, str]:
         """Return (cookies, user_agent) from settings."""
-        cookies = settings.GROK_COOKIES.strip()
+        s = get_settings()
+        cookies = s.GROK_COOKIES.strip()
         if not cookies:
             raise ExternalAPIException(detail="GROK_COOKIES not configured in .env")
-        ua = settings.GROK_USER_AGENT.strip() or (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/146.0.0.0 Safari/537.36"
-        )
+        ua = s.GROK_USER_AGENT.strip()
+        if not ua:
+            raise ExternalAPIException(detail="GROK_USER_AGENT not configured in .env")
         return cookies, ua
 
     @classmethod
@@ -110,7 +109,7 @@ class GrokVideoService:
             "Referer": referer or "https://grok.com/imagine",
             "Content-Type": "application/json",
             "Accept": "*/*",
-            "sec-ch-ua": '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+            "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
             "sec-fetch-dest": "empty",
@@ -170,6 +169,40 @@ class GrokVideoService:
 
         return None
 
+    UPLOAD_URL = "https://grok.com/rest/app-chat/upload-file"
+
+    @classmethod
+    async def _upload_image(cls, image_path: str, cookies: str, user_agent: str) -> str:
+        """Upload a local image to Grok. Returns fileMetadataId."""
+        with open(image_path, "rb") as f:
+            b64 = b64encode(f.read()).decode()
+
+        filename = image_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
+        mime = "image/png" if ext == "png" else "image/jpeg"
+        payload = {"fileName": filename, "fileMimeType": mime, "content": b64}
+
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        req_id = str(uuid4())
+        headers = cls._make_headers(cookies, user_agent, _generate_statsig_id(), req_id)
+        headers["Referer"] = "https://grok.com/"
+
+        async with httpx.AsyncClient(verify=ssl_ctx, timeout=60) as client:
+            resp = await client.post(
+                cls.UPLOAD_URL, headers=headers, content=json.dumps(payload),
+            )
+        if resp.status_code != 200:
+            raise ExternalAPIException(detail=f"Grok image upload failed: HTTP {resp.status_code}")
+        data = resp.json()
+        file_id = data.get("fileMetadataId") or data.get("id") or data.get("fileId")
+        if not file_id:
+            raise ExternalAPIException(detail=f"No fileMetadataId in Grok upload response: {data}")
+        logger.info("Uploaded KOL image to Grok: %s", file_id)
+        return file_id
+
     # ── Core API calls ────────────────────────────────────────────────────
 
     @classmethod
@@ -197,6 +230,7 @@ class GrokVideoService:
         cls, prompt: str, parent_post_id: str,
         cookies: str, user_agent: str, statsig_id: str,
         ratio: str = "16:9", length: int = 6, res: str = "480p",
+        file_attachment_ids: list[str] | None = None,
     ) -> tuple[str | None, str | None]:
         """Start video generation conversation.
         Returns (video_url, video_post_id)."""
@@ -206,6 +240,7 @@ class GrokVideoService:
             "temporary": True,
             "modelName": "grok-3",
             "message": message,
+            "fileAttachments": file_attachment_ids or [],
             "toolOverrides": {"videoGen": True},
             "enableSideBySide": True,
             "responseMetadata": {
@@ -329,6 +364,7 @@ class GrokVideoService:
         res: str = "480p",
         upscale: bool = True,
         session_id: str | None = None,
+        image_path: str | None = None,
     ) -> dict:
         """Generate a video from a text prompt using Grok.
 
@@ -345,6 +381,13 @@ class GrokVideoService:
         cookies, user_agent = cls._get_config()
         statsig_id = _generate_statsig_id()
 
+        # Upload reference KOL image if provided
+        file_attachment_ids: list[str] = []
+        if image_path:
+            logger.info("Uploading KOL reference image: %s", image_path)
+            fid = await cls._upload_image(image_path, cookies, user_agent)
+            file_attachment_ids.append(fid)
+
         # 1. Create media post
         logger.info("Creating media post for prompt: %s", prompt[:50])
         post_id = await cls._create_media_post(prompt, cookies, user_agent, statsig_id)
@@ -357,6 +400,7 @@ class GrokVideoService:
         video_url, video_post_id = await cls._start_conversation(
             prompt, post_id, cookies, user_agent, statsig_id,
             ratio=ratio, length=length, res=res,
+            file_attachment_ids=file_attachment_ids or None,
         )
 
         if not video_url and not video_post_id:

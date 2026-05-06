@@ -40,7 +40,6 @@ def _get_video_duration(filepath: str) -> float:
             [FFMPEG, "-i", filepath],
             capture_output=True, timeout=30,
         )
-        # ffmpeg prints duration in stderr: "Duration: HH:MM:SS.ms"
         stderr = result.stderr.decode("utf-8", errors="replace")
         import re as _re
         m = _re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", stderr)
@@ -50,6 +49,69 @@ def _get_video_duration(filepath: str) -> float:
     except Exception as e:
         logger.warning("ffmpeg duration error: %s", e)
     return 0.0
+
+
+def _get_video_dimensions(filepath: str) -> tuple[int, int]:
+    """Get video width and height using ffmpeg."""
+    try:
+        result = subprocess.run(
+            [FFMPEG, "-i", filepath],
+            capture_output=True, timeout=30,
+        )
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        import re as _re
+        m = _re.search(r"(\d{2,5})x(\d{2,5})", stderr)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    except Exception as e:
+        logger.warning("ffmpeg dimensions error: %s", e)
+    return 0, 0
+
+
+def _crop_to_9_16(filepath: str) -> str:
+    """Crop video to 9:16 portrait ratio using center crop. Returns path to result file."""
+    w, h = _get_video_dimensions(filepath)
+    if w <= 0 or h <= 0:
+        return filepath
+
+    target_ratio = 9 / 16
+    current_ratio = w / h
+
+    if abs(current_ratio - target_ratio) < 0.01:
+        return filepath
+
+    if current_ratio > target_ratio:
+        new_w = int(h * 9 / 16)
+        new_w -= new_w % 2
+        new_h = h - (h % 2)
+        crop_filter = f"crop={new_w}:{new_h}"
+    else:
+        new_h = int(w * 16 / 9)
+        new_h -= new_h % 2
+        new_w = w - (w % 2)
+        crop_filter = f"crop={new_w}:{new_h}"
+
+    base = Path(filepath)
+    out_path = str(base.parent / f"{base.stem}_916{base.suffix}")
+    try:
+        result = subprocess.run(
+            [FFMPEG, "-y", "-i", filepath,
+             "-vf", crop_filter,
+             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+             "-c:a", "aac", "-b:a", "128k",
+             "-movflags", "+faststart",
+             out_path],
+            capture_output=True, timeout=120,
+        )
+        if result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            os.remove(filepath)
+            logger.info("Cropped %s → 9:16 %s", filepath, out_path)
+            return out_path
+        else:
+            logger.warning("ffmpeg crop failed: %s", result.stderr.decode("utf-8", errors="replace")[:300])
+    except Exception as e:
+        logger.warning("ffmpeg crop error: %s", e)
+    return filepath
 
 
 def _split_video(
@@ -208,30 +270,50 @@ def merge_videos(
         output_filename = f"merged_{uuid.uuid4().hex[:8]}.mp4"
     output_path = str(out_dir / output_filename)
 
-    # Create concat list file
-    concat_file = str(out_dir / f"concat_{uuid.uuid4().hex[:6]}.txt")
+    # Build filter_complex: normalize each input to 1080x1920 @ 30fps then concat
+    # This fixes A/V desync caused by mismatched timebase/fps between Douyin & Grok clips
+    n = len(video_paths)
+    target_w, target_h, target_fps = 1080, 1920, 30
+
+    input_args = []
+    for p in video_paths:
+        input_args += ["-i", p]
+
+    # Per-input filter: scale-pad to 9:16, force 30fps, reset SAR
+    filter_parts = []
+    for i in range(n):
+        vf = (
+            f"[{i}:v]"
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"fps={target_fps},setsar=1,setpts=PTS-STARTPTS"
+            f"[v{i}]"
+        )
+        af = f"[{i}:a]aresample=44100,asetpts=PTS-STARTPTS[a{i}]"
+        filter_parts.append(vf)
+        filter_parts.append(af)
+
+    # concat
+    concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
+    filter_parts.append(f"{concat_inputs}concat=n={n}:v=1:a=1[vout][aout]")
+    filter_complex = ";".join(filter_parts)
+
+    cmd = [
+        FFMPEG, "-y",
+        *input_args,
+        "-filter_complex", filter_complex,
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+
     try:
-        with open(concat_file, "w", encoding="utf-8") as f:
-            for p in video_paths:
-                # Use absolute paths and escape single quotes
-                abs_path = os.path.abspath(p).replace("\\", "/").replace("'", "'\\''")
-                f.write(f"file '{abs_path}'\n")
-
-        # Re-encode to unified format for cross-source compatibility
-        cmd = [
-            FFMPEG, "-y",
-            "-f", "concat", "-safe", "0", "-i", concat_file,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-            "-r", "30",
-            output_path,
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, timeout=600)
         if result.returncode != 0:
             stderr = result.stderr.decode("utf-8", errors="replace")
-            logger.error("FFmpeg merge error: %s", stderr[:500])
+            logger.error("FFmpeg merge error: %s", stderr[:800])
             raise ExternalAPIException(detail="Video merge failed")
 
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
@@ -239,15 +321,15 @@ def merge_videos(
 
         logger.info(
             "Merged %d videos → %s (%.1f MB)",
-            len(video_paths), output_path,
+            n, output_path,
             os.path.getsize(output_path) / 1024 / 1024,
         )
         return output_path
 
-    finally:
-        # Clean up concat list
-        if os.path.exists(concat_file):
-            os.remove(concat_file)
+    except ExternalAPIException:
+        raise
+    except Exception as e:
+        raise ExternalAPIException(detail=f"Merge error: {e}")
 
 
 def extract_frames(
@@ -335,6 +417,12 @@ async def download_and_split(
             logger.info("Removed original after split: %s", original_path)
         except OSError as e:
             logger.warning("Could not remove original: %s", e)
+
+    # Crop each segment to 9:16 portrait ratio
+    segment_paths = [
+        await asyncio.to_thread(_crop_to_9_16, path)
+        for path in segment_paths
+    ]
 
     segments = []
     for path in segment_paths:

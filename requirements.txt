@@ -13,3 +13,4 @@ python-multipart==0.0.20
 gmssl==3.2.2
 imageio-ffmpeg==0.5.1
 playwright==1.52.0
+Pillow>=10.0.0

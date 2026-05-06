@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, Request
+import os
+import uuid
+
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
 from core.response.base import SuccessResponse
 from machine.controllers.content_controller import ContentController
@@ -15,6 +18,8 @@ from machine.schemas.content import (
     FetchTrendingRequest,
     FetchTweetRequest,
     FetchUserTweetsRequest,
+    GenerateKOLImageRequest,
+    GenerateKOLImageResponse,
     GeneratePromptsRequest,
     GeneratePromptsResponse,
     GenerateVideoRequest,
@@ -183,12 +188,78 @@ async def fetch_user_tweets(
     return SuccessResponse(data=result)
 
 
+# ── Grok KOL Image Generation ─────────────────────────────────────────────────
+
+@router.post(
+    "/grok/generate-kol-image",
+    response_model=SuccessResponse[GenerateKOLImageResponse],
+    summary="Generate a KOL-styled image using Grok (optional reference face image)",
+)
+async def generate_kol_image(
+    body: GenerateKOLImageRequest,
+    request: Request,
+    controller: ContentController = Depends(get_content_controller),
+):
+    result = await controller.generate_kol_image(
+        image_path=body.image_path,
+        session_id=body.session_id,
+    )
+
+    base_url = str(request.base_url).rstrip("/")
+    filename = result.get("local_filename", "")
+    if filename and body.session_id:
+        result["download_url"] = f"{base_url}/downloads/{body.session_id}/grok/{filename}"
+    elif filename:
+        result["download_url"] = f"{base_url}/downloads/kol_images/{filename}"
+    else:
+        result["download_url"] = ""
+
+    return SuccessResponse(data=result)
+
+
+@router.post(
+    "/grok/remake-kol-image",
+    summary="Upload a KOL image file and remake it via Grok (returns image_urls list)",
+)
+async def remake_kol_image(
+    request: Request,
+    file: UploadFile = File(...),
+    session_id: str = Form(...),
+    controller: ContentController = Depends(get_content_controller),
+):
+    # Save uploaded file to disk
+    upload_dir = os.path.join("downloads", session_id, "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    ext = os.path.splitext(file.filename or "image.jpg")[1] or ".jpg"
+    saved_path = os.path.join(upload_dir, f"kol_input_{uuid.uuid4().hex[:8]}{ext}")
+    content = await file.read()
+    with open(saved_path, "wb") as f:
+        f.write(content)
+
+    result = await controller.generate_kol_image(
+        image_path=saved_path,
+        session_id=session_id,
+    )
+
+    base_url = str(request.base_url).rstrip("/")
+    filename = result.get("local_filename", "")
+    if filename and session_id:
+        download_url = f"{base_url}/downloads/{session_id}/grok/{filename}"
+    elif filename:
+        download_url = f"{base_url}/downloads/kol_images/{filename}"
+    else:
+        download_url = result.get("image_url", "")
+
+    image_urls = [download_url] if download_url else []
+    return SuccessResponse(data={"image_urls": image_urls, "count": len(image_urls)})
+
+
 # ── Grok Video Generation ────────────────────────────────────────────────────
 
 @router.post(
     "/grok/generate-video",
     response_model=SuccessResponse[GenerateVideoResponse],
-    summary="Generate a video from a text prompt using Grok",
+    summary="Generate a KOL video — pass 'content' (auto-builds KOL dialogue prompt) + 'image_path' from generate-kol-image",
 )
 async def generate_video(
     body: GenerateVideoRequest,
@@ -197,6 +268,8 @@ async def generate_video(
 ):
     result = await controller.generate_video(
         prompt=body.prompt,
+        content=body.content,
+        image_path=body.image_path,
         session_id=body.session_id,
         ratio=body.ratio,
         length=body.length,
@@ -208,6 +281,58 @@ async def generate_video(
     base_url = str(request.base_url).rstrip("/")
     if result.get("local_filename") and body.session_id:
         result["download_url"] = f"{base_url}/downloads/{body.session_id}/grok/{result['local_filename']}"
+    elif result.get("local_filename"):
+        result["download_url"] = f"{base_url}/downloads/{result['local_filename']}"
+    else:
+        result["download_url"] = ""
+
+    return SuccessResponse(data=result)
+
+
+@router.post(
+    "/grok/generate-video-from-tweet",
+    response_model=SuccessResponse[GenerateVideoResponse],
+    summary="Alias for generate-video — accepts FE payload with extra_prompt and kol_image_url",
+)
+async def generate_video_from_tweet(
+    body: dict,
+    request: Request,
+    controller: ContentController = Depends(get_content_controller),
+):
+    # Resolve kol_image_url (absolute URL) → local path if it's a downloads/ URL
+    kol_image_url = (body.get("kol_image_url") or "").strip()
+    image_path: str | None = None
+    if kol_image_url:
+        from urllib.parse import urlparse
+        parsed = urlparse(kol_image_url)
+        # e.g. /downloads/session123/grok/kol_abc.jpg → downloads/session123/grok/kol_abc.jpg
+        rel = parsed.path.lstrip("/")
+        if rel.startswith("downloads/") and os.path.exists(rel):
+            image_path = rel
+
+    from machine.external.grok_chat import build_kol_video_prompt
+
+    # extra_prompt = language the user wants (e.g. "Korean", "Vietnamese", "Japanese")
+    # Falls back to Korean if not specified
+    language = (body.get("extra_prompt") or "").strip() or "hàn quốc"
+    content_to_analyze = "Nội dung giới thiệu sản phẩm và kêu gọi tải app Interlink Network"
+    prompt = build_kol_video_prompt(content_to_analyze, language=language)
+
+    result = await controller.generate_video(
+        prompt=prompt,
+        content=None,
+        image_path=image_path,
+        session_id=body.get("session_id") or None,
+        ratio=body.get("ratio") or "9:16",
+        length=int(body.get("length") or 6),
+        res=body.get("res") or "480p",
+        upscale=bool(body.get("upscale", True)),
+    )
+
+    base_url = str(request.base_url).rstrip("/")
+    session_id = body.get("session_id")
+    if result.get("local_filename") and session_id:
+        result["download_url"] = f"{base_url}/downloads/{session_id}/grok/{result['local_filename']}"
     elif result.get("local_filename"):
         result["download_url"] = f"{base_url}/downloads/{result['local_filename']}"
     else:
@@ -363,6 +488,35 @@ async def rewrite_content(
 # ── Publish Video ────��────────────────────��─────────────────────────────────
 
 @router.post(
+    "/publish/upload-video",
+    summary="Upload a local video file to the server and return session_id + filename for publishing",
+)
+async def upload_video_for_publish(
+    request: Request,
+    file: UploadFile = File(...),
+):
+    import uuid
+    from machine.external.video_processor import DOWNLOAD_DIR
+
+    session_id = uuid.uuid4().hex[:12]
+    session_dir = DOWNLOAD_DIR / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    ext = os.path.splitext(file.filename or "video.mp4")[1] or ".mp4"
+    filename = f"upload_{uuid.uuid4().hex[:8]}{ext}"
+    content = await file.read()
+    with open(session_dir / filename, "wb") as f:
+        f.write(content)
+
+    base_url = str(request.base_url).rstrip("/")
+    return SuccessResponse(data={
+        "session_id": session_id,
+        "filename": filename,
+        "download_url": f"{base_url}/downloads/{session_id}/{filename}",
+    })
+
+
+@router.post(
     "/videos/publish",
     response_model=SuccessResponse[PublishVideoResponse],
     summary="Publish a video to YouTube (or other platforms) via browser automation",
@@ -380,6 +534,8 @@ async def publish_video(
         description=body.description,
         tags=body.tags,
         visibility=body.visibility,
+        schedule_time=body.schedule_time,
+        timezone=body.timezone,
     )
     return SuccessResponse(data=result)
 
@@ -397,6 +553,27 @@ async def list_browser_profiles():
     s = get_settings()
     try:
         data = await BrowserService._api_get("/profiles")
+        return SuccessResponse(data=data)
+    except (httpx.ConnectError, httpx.TimeoutException):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot connect to browser API at {s.BROWSER_API_URL}. Make sure the anti-detect browser tool is running."
+        )
+
+
+@router.get(
+    "/browser/groups",
+    summary="List all browser groups from local anti-detect browser API",
+)
+async def list_browser_groups():
+    """Proxy to local browser API — returns group list with profiles."""
+    import httpx
+    from fastapi import HTTPException
+    from machine.external.browser import BrowserService
+    from core.settings import get_settings
+    s = get_settings()
+    try:
+        data = await BrowserService._api_get("/groups")
         return SuccessResponse(data=data)
     except (httpx.ConnectError, httpx.TimeoutException):
         raise HTTPException(
@@ -476,7 +653,13 @@ async def test_browser_connection(profile_id: str):
 async def get_app_settings():
     from core.settings import get_settings
     s = get_settings()
-    return SuccessResponse(data={"browser_api_url": s.BROWSER_API_URL})
+    return SuccessResponse(data={
+        "browser_api_url": s.BROWSER_API_URL,
+        "grok_cookies": s.GROK_COOKIES or "",
+        "grok_user_agent": s.GROK_USER_AGENT or "",
+        "douyin_cookies": s.DOUYIN_COOKIES or "",
+        "x_cookies": s.X_COOKIES or "",
+    })
 
 
 @router.post("/settings", summary="Update app settings (writes to .env, reloads config)")
@@ -485,30 +668,36 @@ async def update_app_settings(body: dict):
     import re
     from core.settings import get_settings
 
-    browser_api_url = (body.get("browser_api_url") or "").strip()
-    if not browser_api_url:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=422, detail="browser_api_url is required")
-
-    # Read/create .env in cwd
     env_path = os.path.join(os.getcwd(), ".env")
-    if os.path.exists(env_path):
-        content = open(env_path, "r", encoding="utf-8").read()
-    else:
-        content = ""
+    content = open(env_path, "r", encoding="utf-8").read() if os.path.exists(env_path) else ""
 
-    key = "BROWSER_API_URL"
-    new_line = f'{key}={browser_api_url}'
-    if re.search(rf'^{key}\s*=', content, re.MULTILINE):
-        content = re.sub(rf'^{key}\s*=.*$', new_line, content, flags=re.MULTILINE)
-    else:
-        content = content.rstrip("\n") + "\n" + new_line + "\n"
+    fields = {
+        "BROWSER_API_URL": (body.get("browser_api_url") or "").strip(),
+        "GROK_COOKIES": (body.get("grok_cookies") or "").strip(),
+        "GROK_USER_AGENT": (body.get("grok_user_agent") or "").strip(),
+        "DOUYIN_COOKIES": (body.get("douyin_cookies") or "").strip(),
+        "X_COOKIES": (body.get("x_cookies") or "").strip(),
+    }
+
+    for key, value in fields.items():
+        if value == "" and key != "BROWSER_API_URL":
+            continue
+        new_line = f'{key}={value}'
+        if re.search(rf'^{key}\s*=', content, re.MULTILINE):
+            content = re.sub(rf'^{key}\s*=.*$', new_line, content, flags=re.MULTILINE)
+        else:
+            content = content.rstrip("\n") + "\n" + new_line + "\n"
 
     with open(env_path, "w", encoding="utf-8") as f:
         f.write(content)
 
-    # Reload settings cache
     get_settings.cache_clear()
-
     s = get_settings()
-    return SuccessResponse(data={"browser_api_url": s.BROWSER_API_URL, "saved": True})
+    return SuccessResponse(data={
+        "browser_api_url": s.BROWSER_API_URL,
+        "grok_cookies": s.GROK_COOKIES or "",
+        "grok_user_agent": s.GROK_USER_AGENT or "",
+        "douyin_cookies": s.DOUYIN_COOKIES or "",
+        "x_cookies": s.X_COOKIES or "",
+        "saved": True,
+    })

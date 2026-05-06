@@ -8,10 +8,12 @@ Used to generate video prompts from crawled content.
 import asyncio
 import json
 import logging
+import os
 import re
 import ssl
 from base64 import b64encode
 from os import urandom
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -21,6 +23,51 @@ from core.settings import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+DOWNLOADS_DIR = Path("downloads")
+
+KOL_IMAGE_PROMPT = (
+    "Initiating the PersonaFusion-vX.03 protocol: Using accurate facial recognition "
+    "obtained from the attached reference image (or from a user-provided face) without "
+    "editing, the reference logo is printed on the left chest of the character's shirt, "
+    "and the logo is printed in a small size, not large. "
+    "A hyper-realistic, extremely sharp image, captured with a modern smartphone, "
+    "characterized by digital clarity, was taken with an iPhone 15 Pro. The image shows "
+    "a person styled like a professional model, the character's clothing changed to a new, "
+    "modern and fashionable style. The setting is a tourist location in a random country. "
+    "The entire scene is displayed with an extremely large depth of field, ensuring "
+    "everything from the rough texture of the foreground to the distant architecture is "
+    "sharp, without background blurring or bokeh effects. The hyper-realistic digital "
+    "texture displays sharp fabric details on clothing, along with a natural, soft skin "
+    "texture with visible pores, completely free of film grain. Bright and even lighting, "
+    "characteristic of modern HDR processing technology on smartphones, brightens dark "
+    "areas to avoid overly deep blacks and creates a vibrant, realistic atmosphere. Colors "
+    "are natural and vivid, with smooth, fresh skin tones and accurately reproduced "
+    "clothing images, as well as the yellow hue of the background, complemented by subtle "
+    "digital noise, highlighting the sense of modern photography."
+)
+
+
+def build_kol_video_prompt(content: str, language: str = "hàn quốc", extra: str = "") -> str:
+    extra_instruction = f"\n\nYêu cầu bổ sung: {extra.strip()}" if extra and extra.strip() else ""
+    return (
+        "Hãy đóng vai một người có hơn 20 năm kinh nghiệm trong lĩnh vực marketing "
+        "chuyên phân tích đối thủ và bài viết của đối thủ, và hãy phân tích nội dung "
+        "tôi gửi sau đây để tạo cho tôi 1 prompt lời thoại duy nhất với nội dung đã "
+        "được phân tích kỹ lưỡng, mở đầu hook đúng trọng tâm nội dung và nói câu gây "
+        "bất ngờ và gây tò mò cho người xem, tạo nội dung sao cho lời thoại thật hấp "
+        "dẫn và phải bắt buộc người xem phải tương tác và thích video của tôi, CTA sẽ "
+        "kêu gọi mọi người nhớ thích video và đăng ký kênh để ủng hộ và đừng quên tải "
+        "app và nhập mã mời để tham gia vào Interlink Network, lời thoại sẽ viết bằng "
+        f"ngôn ngữ tiếng anh, còn lời thoại thì sẽ viết hoàn toàn ngôn ngữ {language} "
+        "chuẩn chính tả, video chỉ có 1 cảnh duy nhất không chuyển cảnh, và không hiện "
+        "bất cứ hiệu ứng gì hay chữ xuất hiện trong video, hạn chế sử dụng các từ nhạy "
+        "cảm và vi phạm chính sách của youtube năm 2026 như là về tiền hoặc là kiếm "
+        "tiền, tránh các từ ngữ nhạy cảm dẫn đến video bị flop tụt view, prompt phải "
+        "viết liền mạch 1 đoạn, lời thoại cần nói cử chỉ và biểu cảm thân thiện và "
+        f"lời thoại chỉ tầm 200 ký tự.{extra_instruction}\n\n"
+        f"Nội dung cần phân tích:\n{content}"
+    )
 
 
 def _build_headers(cookies: str, user_agent: str) -> dict:
@@ -32,7 +79,7 @@ def _build_headers(cookies: str, user_agent: str) -> dict:
         "Cookie": cookies,
         "Origin": "https://grok.com",
         "Referer": "https://grok.com/",
-        "sec-ch-ua": '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+        "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
         "sec-fetch-dest": "empty",
@@ -83,14 +130,13 @@ class GrokChatService:
 
     @classmethod
     def _get_config(cls) -> tuple[str, str]:
-        cookies = settings.GROK_COOKIES.strip()
+        s = get_settings()
+        cookies = s.GROK_COOKIES.strip()
         if not cookies:
             raise ExternalAPIException(detail="GROK_COOKIES not configured")
-        ua = settings.GROK_USER_AGENT.strip() or (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/146.0.0.0 Safari/537.36"
-        )
+        ua = s.GROK_USER_AGENT.strip()
+        if not ua:
+            raise ExternalAPIException(detail="GROK_USER_AGENT not configured in .env")
         return cookies, ua
 
     @classmethod
@@ -254,6 +300,217 @@ class GrokChatService:
                 prompts.append(cleaned)
 
         return prompts[:count]
+
+    # ── KOL Image Generation ─────────────────────────────────────────
+
+    @staticmethod
+    def _crop_image_to_9_16(image_path: str) -> str:
+        """Center-crop image to 9:16 portrait ratio. Returns path (may be a new file)."""
+        try:
+            from PIL import Image
+            img = Image.open(image_path)
+            w, h = img.size
+            target_ratio = 9 / 16
+            current_ratio = w / h
+
+            if abs(current_ratio - target_ratio) < 0.01:
+                return image_path
+
+            if current_ratio > target_ratio:
+                new_w = int(h * 9 / 16)
+                left = (w - new_w) // 2
+                img = img.crop((left, 0, left + new_w, h))
+            else:
+                new_h = int(w * 16 / 9)
+                top = (h - new_h) // 2
+                img = img.crop((0, top, w, top + new_h))
+
+            base, ext = os.path.splitext(image_path)
+            out_path = f"{base}_916{ext}"
+            img.save(out_path)
+            logger.info("Cropped image to 9:16: %s → %s", image_path, out_path)
+            return out_path
+        except Exception as e:
+            logger.warning("Image crop to 9:16 failed: %s", e)
+            return image_path
+
+    @classmethod
+    async def generate_kol_image(
+        cls,
+        image_path: str | None = None,
+        session_id: str | None = None,
+    ) -> dict:
+        """Generate a KOL-styled image using Grok image generation.
+
+        Optionally accepts a reference face image to incorporate into the generated image.
+        Returns dict with local_filename, image_url, download_url.
+        """
+        cookies, ua = cls._get_config()
+        headers = _build_headers(cookies, ua)
+
+        file_ids: list[str] = []
+        if image_path:
+            image_path = await asyncio.to_thread(cls._crop_image_to_9_16, image_path)
+            fid = await cls._upload_image(image_path)
+            file_ids.append(fid)
+
+        body = {
+            "temporary": True,
+            "message": KOL_IMAGE_PROMPT,
+            "fileAttachments": file_ids,
+            "imageAttachments": [],
+            "disableSearch": False,
+            "enableImageGeneration": True,
+            "returnImageBytes": False,
+            "enableImageStreaming": True,
+            "imageGenerationCount": 1,
+            "forceConcise": False,
+            "toolOverrides": {},
+            "enableSideBySide": True,
+            "sendFinalMetadata": True,
+            "isReasoning": False,
+            "disableTextFollowUps": False,
+            "responseMetadata": {},
+            "disableMemory": False,
+            "forceSideBySide": False,
+            "isAsyncChat": False,
+            "disableSelfHarmShortCircuit": False,
+            "modeId": "imagine",
+            "enable420": False,
+        }
+
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        async with httpx.AsyncClient(verify=ssl_ctx, timeout=180) as client:
+            try:
+                resp = await client.post(
+                    cls.CHAT_URL, headers=headers,
+                    content=json.dumps(body),
+                )
+            except Exception as e:
+                raise ExternalAPIException(detail=f"Grok image generation error: {e}")
+
+        if resp.status_code == 429:
+            raise ExternalAPIException(detail="Grok account out of credits (429)")
+        if resp.status_code == 403:
+            raise ExternalAPIException(detail="Grok 403 — cookies expired. Update GROK_COOKIES.")
+        if resp.status_code != 200:
+            raise ExternalAPIException(detail=f"Grok image generation HTTP {resp.status_code}")
+
+        # Parse stream for generated image URLs
+        text = resp.text
+        image_url: str = ""
+        asset_id: str = ""
+        pos = 0
+
+        logger.warning("=== Grok imagine raw response (first 800): %s", text[:800])
+        print(f"[GROK DEBUG] status={resp.status_code} len={len(text)} first800={text[:800]}", flush=True)
+
+        while pos < len(text):
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+            if pos >= len(text):
+                break
+            try:
+                chunk, pos = _parse_json_at(text, pos)
+            except (ValueError, json.JSONDecodeError):
+                break
+
+            r = (chunk.get("result") or {}).get("response")
+            if not r:
+                r = chunk.get("response") or {}
+
+            # Log interesting chunks for debugging
+            if r:
+                interesting_keys = [k for k in r if k not in (
+                    "userResponse", "progressReport", "isThinking", "isSoftStop", "responseId"
+                )]
+                if interesting_keys:
+                    logger.warning("=== Grok response keys: %s", list(r.keys()))
+                    for ik in interesting_keys:
+                        logger.warning("=== Grok[%s] = %s", ik, str(r[ik])[:500])
+
+            # cardAttachment.jsonData contains the generated image
+            card = r.get("cardAttachment") or {}
+            json_data_str = card.get("jsonData") or ""
+            if json_data_str:
+                try:
+                    card_data = json.loads(json_data_str)
+                    image_chunk = card_data.get("image_chunk") or {}
+                    chunk_url = image_chunk.get("imageUrl") or ""
+                    progress = image_chunk.get("progress", 0)
+                    if chunk_url and progress == 100 and not image_url:
+                        # relative path → prepend CDN base
+                        if not chunk_url.startswith("http"):
+                            chunk_url = f"https://assets.grok.com/{chunk_url.lstrip('/')}"
+                        image_url = chunk_url
+                        asset_id = image_chunk.get("imageUuid") or ""
+                        logger.warning("KOL image URL from cardAttachment (progress=100): %s", image_url)
+                except Exception as e:
+                    logger.warning("cardAttachment parse error: %s", e)
+
+        # Fallback: regex scan raw text for image URLs
+        if not image_url:
+            found = re.findall(
+                r'https?://[^\s"\'\\]+\.(?:jpg|jpeg|png|webp)(?:[^\s"\'\\]*)?',
+                text
+            )
+            if found:
+                image_url = found[0]
+                logger.info("KOL image URL via regex fallback: %s", image_url)
+
+        if not image_url:
+            logger.warning("=== Grok imagine FULL response (%d chars): %s", len(text), text[:3000])
+            print(f"[GROK DEBUG] NO IMAGE URL. full={text[:3000]}", flush=True)
+            raise ExternalAPIException(detail="Grok image generation returned no image URL")
+
+        # Download and save image
+        if session_id:
+            out_dir = DOWNLOADS_DIR / session_id / "grok"
+        else:
+            out_dir = DOWNLOADS_DIR / "kol_images"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        ext = ".jpg"
+        if ".png" in image_url.lower():
+            ext = ".png"
+        filename = f"kol_{asset_id or 'image'}{ext}"
+        save_path = out_dir / filename
+
+        full_url = image_url if image_url.startswith("http") else f"https://assets.grok.com/{image_url.lstrip('/')}"
+        ssl_ctx2 = ssl.create_default_context()
+        ssl_ctx2.check_hostname = False
+        ssl_ctx2.verify_mode = ssl.CERT_NONE
+
+        downloaded = False
+        async with httpx.AsyncClient(verify=ssl_ctx2, timeout=60) as client:
+            try:
+                dl_resp = await client.get(
+                    full_url,
+                    headers={"User-Agent": ua, "Referer": "https://grok.com/", "Cookie": cookies},
+                )
+                if dl_resp.status_code == 200 and len(dl_resp.content) > 500:
+                    save_path.write_bytes(dl_resp.content)
+                    downloaded = True
+                    logger.info("KOL image saved: %s (%d bytes)", save_path, len(dl_resp.content))
+                    # Crop generated image to 9:16
+                    cropped = await asyncio.to_thread(
+                        GrokChatService._crop_image_to_9_16, str(save_path)
+                    )
+                    if cropped != str(save_path):
+                        save_path = Path(cropped)
+                        filename = save_path.name
+            except Exception as e:
+                logger.warning("KOL image download failed: %s", e)
+
+        return {
+            "local_filename": filename if downloaded else "",
+            "local_path": str(save_path) if downloaded else "",
+            "image_url": image_url,
+            "asset_id": asset_id,
+        }
 
     # ── Image upload & Video review ──────────────────────────────────
 
