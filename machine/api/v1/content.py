@@ -583,6 +583,27 @@ async def list_browser_groups():
 
 
 @router.get(
+    "/browser/groups/{group_id}/profiles",
+    summary="List profiles in a specific browser group",
+)
+async def list_browser_group_profiles(group_id: str):
+    """Proxy to local browser API /groups/{id} — returns profiles in the group."""
+    import httpx
+    from fastapi import HTTPException
+    from machine.external.browser import BrowserService
+    from core.settings import get_settings
+    s = get_settings()
+    try:
+        data = await BrowserService._api_get(f"/groups/{group_id}")
+        return SuccessResponse(data=data)
+    except (httpx.ConnectError, httpx.TimeoutException):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot connect to browser API at {s.BROWSER_API_URL}. Make sure the anti-detect browser tool is running."
+        )
+
+
+@router.get(
     "/browser/health",
     summary="Check if local anti-detect browser API is reachable",
 )
